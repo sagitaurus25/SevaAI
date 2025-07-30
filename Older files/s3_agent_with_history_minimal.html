@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>S3 Agent with History</title>
+    <style>
+        body { font-family: Arial; margin: 0; padding: 20px; }
+        .chat { max-width: 800px; margin: 0 auto; border: 1px solid #ddd; border-radius: 5px; overflow: hidden; }
+        .header { background: #232F3E; color: white; padding: 10px; display: flex; justify-content: space-between; align-items: center; }
+        .title { font-weight: bold; }
+        .buttons { display: flex; gap: 10px; }
+        .header-button { background: rgba(255,255,255,0.2); border: none; color: white; padding: 5px 10px; border-radius: 4px; cursor: pointer; }
+        .messages { height: 400px; padding: 10px; overflow-y: auto; }
+        .input-area { display: flex; padding: 10px; border-top: 1px solid #ddd; }
+        input { flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        button { background: #FF9900; color: white; border: none; padding: 8px 15px; margin-left: 5px; border-radius: 4px; cursor: pointer; }
+        .user { text-align: right; margin: 5px 0; }
+        .bot { text-align: left; margin: 5px 0; }
+        .system { text-align: center; margin: 10px 0; color: #666; font-style: italic; }
+        .message-bubble { display: inline-block; padding: 8px 12px; border-radius: 15px; max-width: 70%; }
+        .user .message-bubble { background: #FF9900; color: white; }
+        .bot .message-bubble { background: #f1f1f1; }
+        .system .message-bubble { background: #e6f7ff; }
+    </style>
+</head>
+<body>
+    <div class="chat">
+        <div class="header">
+            <div class="title">S3 Agent with History</div>
+            <div class="buttons">
+                <button class="header-button" id="historyButton">History</button>
+                <button class="header-button" id="helpButton">Help</button>
+                <button class="header-button" id="clearButton">Clear</button>
+            </div>
+        </div>
+        <div class="messages" id="messages">
+            <div class="bot"><div class="message-bubble">Hello! I'm your S3 Agent. How can I help you today?</div></div>
+        </div>
+        <div class="input-area">
+            <input type="text" id="input" placeholder="Type your message...">
+            <button id="send">Send</button>
+        </div>
+    </div>
+
+    <script>
+        const messagesDiv = document.getElementById('messages');
+        const input = document.getElementById('input');
+        const sendButton = document.getElementById('send');
+        const historyButton = document.getElementById('historyButton');
+        const helpButton = document.getElementById('helpButton');
+        const clearButton = document.getElementById('clearButton');
+        const apiEndpoint = 'https://1jbk6z92h3.execute-api.us-east-1.amazonaws.com/prod/s3agent';
+        let sessionId = Date.now().toString();
+
+        // Event listeners
+        sendButton.addEventListener('click', sendMessage);
+        input.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') sendMessage();
+        });
+        historyButton.addEventListener('click', () => sendSpecialCommand('history'));
+        helpButton.addEventListener('click', () => sendSpecialCommand('help'));
+        clearButton.addEventListener('click', clearChat);
+
+        function sendMessage() {
+            const message = input.value.trim();
+            if (!message) return;
+
+            // Add user message
+            addMessage(message, 'user');
+            input.value = '';
+
+            // Call API
+            callApi(message);
+        }
+
+        function sendSpecialCommand(command) {
+            addMessage(`Requesting ${command}...`, 'system');
+            callApi(command);
+        }
+
+        function callApi(message) {
+            fetch(apiEndpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message, session_id: sessionId })
+            })
+            .then(response => response.json())
+            .then(data => {
+                addMessage(data.response, 'bot');
+                if (data.session_id) sessionId = data.session_id;
+            })
+            .catch(error => {
+                addMessage('Error: Could not connect to the server.', 'bot');
+                console.error(error);
+            });
+        }
+
+        function addMessage(text, sender) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = sender;
+            
+            const bubble = document.createElement('div');
+            bubble.className = 'message-bubble';
+            
+            // Format the text (handle newlines)
+            const formattedText = text.replace(/\n/g, '<br>');
+            bubble.innerHTML = formattedText;
+            
+            messageDiv.appendChild(bubble);
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function clearChat() {
+            if (confirm('Are you sure you want to clear the chat?')) {
+                // Keep only the first welcome message
+                while (messagesDiv.childNodes.length > 1) {
+                    messagesDiv.removeChild(messagesDiv.lastChild);
+                }
+                addMessage('Chat cleared!', 'system');
+            }
+        }
+
+        // Focus on input field
+        input.focus();
+    </script>
+</body>
+</html>

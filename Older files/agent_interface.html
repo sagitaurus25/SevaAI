@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AWS Agent Interface</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .header {
+            background-color: #232f3e;
+            color: white;
+            padding: 20px;
+            border-radius: 8px 8px 0 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+        }
+        .chat-container {
+            background-color: white;
+            border-radius: 0 0 8px 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+        .chat-messages {
+            height: 500px;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+        }
+        .message {
+            margin-bottom: 15px;
+            max-width: 80%;
+            padding: 10px 15px;
+            border-radius: 18px;
+            position: relative;
+            word-wrap: break-word;
+        }
+        .user-message {
+            background-color: #f0f0f0;
+            align-self: flex-end;
+            border-bottom-right-radius: 4px;
+        }
+        .agent-message {
+            background-color: #e1f5fe;
+            align-self: flex-start;
+            border-bottom-left-radius: 4px;
+        }
+        .message-input {
+            display: flex;
+            padding: 15px;
+            background-color: #f9f9f9;
+            border-top: 1px solid #eee;
+        }
+        .message-input input {
+            flex: 1;
+            padding: 12px 15px;
+            border: 1px solid #ddd;
+            border-radius: 25px;
+            outline: none;
+            font-size: 16px;
+        }
+        .message-input button {
+            background-color: #ff9900;
+            color: white;
+            border: none;
+            border-radius: 25px;
+            padding: 12px 20px;
+            margin-left: 10px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+        .message-input button:hover {
+            background-color: #e88a00;
+        }
+        .typing-indicator {
+            display: none;
+            align-self: flex-start;
+            background-color: #e1f5fe;
+            padding: 10px 15px;
+            border-radius: 18px;
+            margin-bottom: 15px;
+            border-bottom-left-radius: 4px;
+        }
+        .typing-indicator span {
+            height: 8px;
+            width: 8px;
+            background-color: #333;
+            display: inline-block;
+            border-radius: 50%;
+            animation: typing 1s infinite;
+            margin-right: 5px;
+        }
+        .typing-indicator span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+        .typing-indicator span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+        @keyframes typing {
+            0% { transform: translateY(0); }
+            50% { transform: translateY(-5px); }
+            100% { transform: translateY(0); }
+        }
+        .code-block {
+            background-color: #f8f8f8;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            margin: 10px 0;
+        }
+        .copy-button {
+            background-color: #eee;
+            border: none;
+            border-radius: 4px;
+            padding: 5px 10px;
+            margin-top: 5px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .copy-button:hover {
+            background-color: #ddd;
+        }
+        .service-selector {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        .service-button {
+            background-color: #eee;
+            border: none;
+            border-radius: 20px;
+            padding: 8px 15px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        .service-button:hover {
+            background-color: #ddd;
+        }
+        .service-button.active {
+            background-color: #ff9900;
+            color: white;
+        }
+        .help-panel {
+            background-color: #f9f9f9;
+            border-left: 1px solid #eee;
+            padding: 15px;
+            font-size: 14px;
+            display: none;
+        }
+        .help-panel.visible {
+            display: block;
+        }
+        .help-toggle {
+            background-color: transparent;
+            color: white;
+            border: 1px solid white;
+            border-radius: 4px;
+            padding: 5px 10px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>AWS Agent</h1>
+            <button class="help-toggle" onclick="toggleHelp()">Help</button>
+        </div>
+        
+        <div class="chat-container">
+            <div class="service-selector">
+                <button class="service-button active" data-service="all">All Services</button>
+                <button class="service-button" data-service="s3">S3</button>
+                <button class="service-button" data-service="ec2">EC2</button>
+                <button class="service-button" data-service="lambda">Lambda</button>
+                <button class="service-button" data-service="iam">IAM</button>
+                <button class="service-button" data-service="cloudwatch">CloudWatch</button>
+            </div>
+            
+            <div class="chat-messages" id="chatMessages">
+                <div class="message agent-message">
+                    Hello! I'm your AWS Agent. How can I help you today?
+                </div>
+                <div class="typing-indicator" id="typingIndicator">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </div>
+            </div>
+            
+            <div class="message-input">
+                <input type="text" id="messageInput" placeholder="Type your request..." onkeypress="handleKeyPress(event)">
+                <button onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+        
+        <div class="help-panel" id="helpPanel">
+            <h3>Example Commands</h3>
+            <h4>S3</h4>
+            <ul>
+                <li>"List my buckets"</li>
+                <li>"Show files in bucket [bucket-name]"</li>
+                <li>"Create a new bucket called [bucket-name]"</li>
+                <li>"Delete bucket [bucket-name]"</li>
+            </ul>
+            
+            <h4>EC2</h4>
+            <ul>
+                <li>"List my EC2 instances"</li>
+                <li>"Start instance i-1234abcd"</li>
+                <li>"Stop instance i-1234abcd"</li>
+                <li>"Show instance details for i-1234abcd"</li>
+            </ul>
+            
+            <h4>Lambda</h4>
+            <ul>
+                <li>"List my Lambda functions"</li>
+                <li>"Show Lambda invocations for [function-name]"</li>
+                <li>"Get function details for [function-name]"</li>
+            </ul>
+            
+            <h4>IAM</h4>
+            <ul>
+                <li>"List IAM users"</li>
+                <li>"List IAM roles"</li>
+                <li>"Show policies for user [username]"</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const API_ENDPOINT = 'https://your-api-gateway-endpoint.execute-api.region.amazonaws.com/prod';
+        let sessionId = null;
+        let selectedService = 'all';
+        
+        // Initialize WebSocket connection
+        let socket = null;
+        
+        function initializeWebSocket() {
+            const wsEndpoint = API_ENDPOINT.replace('https://', 'wss://');
+            socket = new WebSocket(`${wsEndpoint}/ws`);
+            
+            socket.onopen = function(event) {
+                console.log('WebSocket connection established');
+            };
+            
+            socket.onmessage = function(event) {
+                const response = JSON.parse(event.data);
+                
+                if (response.session_id && !sessionId) {
+                    sessionId = response.session_id;
+                    localStorage.setItem('awsAgentSessionId', sessionId);
+                }
+                
+                if (response.message) {
+                    hideTypingIndicator();
+                    displayAgentMessage(response.message, response.cli_command);
+                }
+            };
+            
+            socket.onclose = function(event) {
+                console.log('WebSocket connection closed');
+                // Attempt to reconnect after a delay
+                setTimeout(initializeWebSocket, 3000);
+            };
+            
+            socket.onerror = function(error) {
+                console.error('WebSocket error:', error);
+            };
+        }
+        
+        // Initialize on page load
+        window.onload = function() {
+            // Check for existing session
+            sessionId = localStorage.getItem('awsAgentSessionId');
+            
+            // Initialize WebSocket
+            initializeWebSocket();
+            
+            // Set up service selector
+            const serviceButtons = document.querySelectorAll('.service-button');
+            serviceButtons.forEach(button => {
+                button.addEventListener('click', function() {
+                    serviceButtons.forEach(btn => btn.classList.remove('active'));
+                    this.classList.add('active');
+                    selectedService = this.getAttribute('data-service');
+                });
+            });
+        };
+        
+        function sendMessage() {
+            const messageInput = document.getElementById('messageInput');
+            const message = messageInput.value.trim();
+            
+            if (message === '') return;
+            
+            // Display user message
+            displayUserMessage(message);
+            
+            // Clear input
+            messageInput.value = '';
+            
+            // Show typing indicator
+            showTypingIndicator();
+            
+            // Send message to API
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                // Send via WebSocket
+                socket.send(JSON.stringify({
+                    action: 'sendMessage',
+                    message: message,
+                    session_id: sessionId,
+                    service: selectedService !== 'all' ? selectedService : null
+                }));
+            } else {
+                // Fallback to REST API
+                fetch(API_ENDPOINT, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        message: message,
+                        session_id: sessionId,
+                        service: selectedService !== 'all' ? selectedService : null
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    hideTypingIndicator();
+                    
+                    if (data.session_id && !sessionId) {
+                        sessionId = data.session_id;
+                        localStorage.setItem('awsAgentSessionId', sessionId);
+                    }
+                    
+                    displayAgentMessage(data.message, data.cli_command);
+                })
+                .catch(error => {
+                    hideTypingIndicator();
+                    displayAgentMessage('Sorry, there was an error processing your request. Please try again.');
+                    console.error('Error:', error);
+                });
+            }
+        }
+        
+        function displayUserMessage(message) {
+            const chatMessages = document.getElementById('chatMessages');
+            const messageElement = document.createElement('div');
+            messageElement.className = 'message user-message';
+            messageElement.textContent = message;
+            chatMessages.appendChild(messageElement);
+            scrollToBottom();
+        }
+        
+        function displayAgentMessage(message, cliCommand) {
+            const chatMessages = document.getElementById('chatMessages');
+            const messageElement = document.createElement('div');
+            messageElement.className = 'message agent-message';
+            
+            // Process message for code blocks
+            let processedMessage = message;
+            
+            // Add CLI command if available
+            if (cliCommand) {
+                const codeBlock = document.createElement('div');
+                codeBlock.className = 'code-block';
+                codeBlock.textContent = cliCommand;
+                
+                const copyButton = document.createElement('button');
+                copyButton.className = 'copy-button';
+                copyButton.textContent = 'Copy';
+                copyButton.onclick = function() {
+                    navigator.clipboard.writeText(cliCommand);
+                    copyButton.textContent = 'Copied!';
+                    setTimeout(() => {
+                        copyButton.textContent = 'Copy';
+                    }, 2000);
+                };
+                
+                messageElement.innerHTML = processedMessage;
+                messageElement.appendChild(document.createElement('br'));
+                messageElement.appendChild(document.createElement('br'));
+                messageElement.appendChild(document.createTextNode('AWS CLI Command:'));
+                messageElement.appendChild(codeBlock);
+                messageElement.appendChild(copyButton);
+            } else {
+                messageElement.innerHTML = processedMessage;
+            }
+            
+            chatMessages.appendChild(messageElement);
+            scrollToBottom();
+        }
+        
+        function showTypingIndicator() {
+            const typingIndicator = document.getElementById('typingIndicator');
+            typingIndicator.style.display = 'block';
+            scrollToBottom();
+        }
+        
+        function hideTypingIndicator() {
+            const typingIndicator = document.getElementById('typingIndicator');
+            typingIndicator.style.display = 'none';
+        }
+        
+        function scrollToBottom() {
+            const chatMessages = document.getElementById('chatMessages');
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+        
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+        
+        function toggleHelp() {
+            const helpPanel = document.getElementById('helpPanel');
+            helpPanel.classList.toggle('visible');
+        }
+    </script>
+</body>
+</html>

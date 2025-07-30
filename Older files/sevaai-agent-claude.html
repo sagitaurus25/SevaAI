@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Seva AiGent - AWS Assistant</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2rem;
+            margin-bottom: 5px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 1rem;
+        }
+
+        .controls {
+            padding: 15px 20px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        .controls label {
+            font-weight: 600;
+            color: #495057;
+        }
+
+        .controls select {
+            padding: 8px 12px;
+            border: 1px solid #ced4da;
+            border-radius: 6px;
+            background: white;
+            color: #495057;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .status {
+            margin-left: auto;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .chat-container {
+            height: 500px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: #ffffff;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+        }
+
+        .message.user {
+            flex-direction: row-reverse;
+        }
+
+        .message-avatar {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 14px;
+            flex-shrink: 0;
+        }
+
+        .message.user .message-avatar {
+            background: #007bff;
+            color: white;
+        }
+
+        .message.bot .message-avatar {
+            background: #28a745;
+            color: white;
+        }
+
+        .message.error .message-avatar {
+            background: #dc3545;
+            color: white;
+        }
+
+        .message-content {
+            max-width: 70%;
+            padding: 12px 16px;
+            border-radius: 12px;
+            line-height: 1.4;
+            word-wrap: break-word;
+        }
+
+        .message.user .message-content {
+            background: #007bff;
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.bot .message-content {
+            background: #f8f9fa;
+            color: #212529;
+            border: 1px solid #e9ecef;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message.error .message-content {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .message-time {
+            font-size: 11px;
+            opacity: 0.6;
+            margin-top: 4px;
+        }
+
+        .input-container {
+            padding: 20px;
+            background: #f8f9fa;
+            border-top: 1px solid #e9ecef;
+            display: flex;
+            gap: 10px;
+        }
+
+        .input-wrapper {
+            flex: 1;
+            position: relative;
+        }
+
+        #messageInput {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e9ecef;
+            border-radius: 25px;
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        #messageInput:focus {
+            border-color: #007bff;
+        }
+
+        .send-button {
+            padding: 12px 24px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background-color 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .send-button:hover:not(:disabled) {
+            background: #0056b3;
+        }
+
+        .send-button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+
+        .clear-button {
+            padding: 8px 16px;
+            background: transparent;
+            color: #6c757d;
+            border: 1px solid #6c757d;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+
+        .clear-button:hover {
+            background: #6c757d;
+            color: white;
+        }
+
+        .typing-indicator {
+            display: none;
+            padding: 10px 16px;
+            color: #6c757d;
+            font-style: italic;
+            font-size: 14px;
+        }
+
+        .help-text {
+            padding: 15px 20px;
+            background: #e3f2fd;
+            color: #1565c0;
+            font-size: 14px;
+            border-left: 4px solid #2196f3;
+            margin: 10px 20px;
+            border-radius: 4px;
+        }
+
+        @media (max-width: 600px) {
+            body {
+                padding: 10px;
+            }
+            
+            .controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            .message-content {
+                max-width: 85%;
+            }
+            
+            .input-container {
+                flex-direction: column;
+            }
+            
+            .send-button {
+                align-self: flex-end;
+            }
+        }
+
+        /* Message formatting */
+        .message-content strong {
+            font-weight: 600;
+        }
+
+        .message-content a {
+            color: #007bff;
+            text-decoration: none;
+        }
+
+        .message-content a:hover {
+            text-decoration: underline;
+        }
+
+        /* Loading animation */
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #007bff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 Seva AiGent</h1>
+            <p>Your AWS Assistant - Powered by Claude</p>
+        </div>
+        
+        <div class="controls">
+            <label for="aiModel">AI Model:</label>
+            <select id="aiModel">
+                <option value="claude">Claude Sonnet</option>
+            </select>
+            <span class="status connected" id="connectionStatus">🟢 Ready</span>
+            <button class="clear-button" onclick="clearChat()">Clear Chat</button>
+        </div>
+
+        <div class="help-text">
+            💡 <strong>Try commands like:</strong> "list buckets", "list files in my-bucket", "list instances", or just type "help"
+        </div>
+
+        <div class="chat-container">
+            <div class="messages" id="messages">
+                <div class="message bot">
+                    <div class="message-avatar">🤖</div>
+                    <div class="message-content">
+                        Hello! I'm your AWS assistant powered by Claude. Type "help" to see what I can do!
+                        <div class="message-time" id="welcomeTime"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="typing-indicator" id="typingIndicator">
+                🤖 Seva is thinking...
+            </div>
+        </div>
+
+        <div class="input-container">
+            <div class="input-wrapper">
+                <input 
+                    type="text" 
+                    id="messageInput" 
+                    placeholder="Ask me about your AWS services..."
+                    autocomplete="off"
+                >
+            </div>
+            <button class="send-button" id="sendButton" onclick="sendMessage()">
+                <span id="sendButtonText">Send</span>
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // Configuration - CLAUDE PARSER API ENDPOINT
+        const API_ENDPOINT = 'https://h0wv9jg2hf.execute-api.us-east-1.amazonaws.com/prod/execute';
+        const sessionId = 'session-' + Math.random().toString(36).substr(2, 12) + '-' + Date.now();
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            setWelcomeTime();
+            document.getElementById('messageInput').focus();
+        });
+
+        function setWelcomeTime() {
+            const now = new Date();
+            document.getElementById('welcomeTime').textContent = now.toLocaleTimeString();
+        }
+
+        function addMessage(content, type = 'bot', sender = 'Seva') {
+            const messagesContainer = document.getElementById('messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+            
+            const avatar = document.createElement('div');
+            avatar.className = 'message-avatar';
+            avatar.textContent = type === 'user' ? '👤' : (type === 'error' ? '❌' : '🤖');
+            
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            contentDiv.innerHTML = content;
+            
+            const timeDiv = document.createElement('div');
+            timeDiv.className = 'message-time';
+            timeDiv.textContent = new Date().toLocaleTimeString();
+            contentDiv.appendChild(timeDiv);
+            
+            messageDiv.appendChild(avatar);
+            messageDiv.appendChild(contentDiv);
+            messagesContainer.appendChild(messageDiv);
+            
+            // Scroll to bottom
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        function showTyping() {
+            document.getElementById('typingIndicator').style.display = 'block';
+            const messages = document.getElementById('messages');
+            messages.scrollTop = messages.scrollHeight;
+        }
+
+        function hideTyping() {
+            document.getElementById('typingIndicator').style.display = 'none';
+        }
+
+        function setConnectionStatus(status, message) {
+            const statusElement = document.getElementById('connectionStatus');
+            statusElement.className = `status ${status}`;
+            statusElement.textContent = message;
+        }
+
+        function setSendButtonState(loading = false) {
+            const button = document.getElementById('sendButton');
+            const text = document.getElementById('sendButtonText');
+            const input = document.getElementById('messageInput');
+            
+            if (loading) {
+                button.disabled = true;
+                text.innerHTML = '<div class="loading"></div>';
+                input.disabled = true;
+            } else {
+                button.disabled = false;
+                text.textContent = 'Send';
+                input.disabled = false;
+                input.focus();
+            }
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+            
+            if (!message) {
+                input.focus();
+                return;
+            }
+            
+            // Add user message
+            addMessage(message, 'user', 'You');
+            input.value = '';
+            
+            // Show loading state
+            setSendButtonState(true);
+            showTyping();
+            setConnectionStatus('connecting', '🟡 Sending...');
+            
+            try {
+                // Use the Claude parser API endpoint
+                const response = await fetch(API_ENDPOINT, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        message: message,
+                        session_id: sessionId
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                console.log('API Response:', data);
+                
+                hideTyping();
+                
+                if (data.response) {
+                    // Format the response with proper line breaks and styling
+                    const formattedResponse = formatResponse(data.response);
+                    addMessage(formattedResponse, 'bot', 'Seva');
+                    setConnectionStatus('connected', '🟢 Connected');
+                } else if (data.error) {
+                    addMessage(`<strong>Error:</strong> ${data.error}`, 'error', 'System');
+                    setConnectionStatus('error', '🔴 Error');
+                } else {
+                    addMessage(`<strong>Unexpected response:</strong><br><pre>${JSON.stringify(data, null, 2)}</pre>`, 'error', 'System');
+                    setConnectionStatus('error', '🔴 Unexpected');
+                }
+                
+            } catch (error) {
+                hideTyping();
+                console.error('Connection error:', error);
+                addMessage(
+                    `<strong>Connection Error:</strong><br>
+                    ${error.message}<br><br>
+                    <small>Please check your internet connection and try again. If the problem persists, the API might be temporarily unavailable.</small>`, 
+                    'error', 
+                    'System'
+                );
+                setConnectionStatus('error', '🔴 Connection Failed');
+            } finally {
+                setSendButtonState(false);
+            }
+        }
+
+        function formatResponse(response) {
+            // Convert newlines to HTML breaks
+            let formatted = response.replace(/\n/g, '<br>');
+            
+            // Make text between ** bold
+            formatted = formatted.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+            
+            // Make text between * italic
+            formatted = formatted.replace(/\*(.*?)\*/g, '<em>$1</em>');
+            
+            // Convert URLs to clickable links
+            formatted = formatted.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank">$1</a>');
+            
+            return formatted;
+        }
+
+        function clearChat() {
+            if (confirm('Are you sure you want to clear the chat history?')) {
+                const messagesContainer = document.getElementById('messages');
+                messagesContainer.innerHTML = `
+                    <div class="message bot">
+                        <div class="message-avatar">🤖</div>
+                        <div class="message-content">
+                            Chat cleared! What can I help you with?
+                            <div class="message-time">${new Date().toLocaleTimeString()}</div>
+                        </div>
+                    </div>
+                `;
+                document.getElementById('messageInput').focus();
+            }
+        }
+
+        // Event listeners
+        document.getElementById('messageInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        // Add some helpful keyboard shortcuts
+        document.addEventListener('keydown', function(e) {
+            // Ctrl/Cmd + K to clear chat
+            if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+                e.preventDefault();
+                clearChat();
+            }
+            
+            // Escape to focus input
+            if (e.key === 'Escape') {
+                document.getElementById('messageInput').focus();
+            }
+        });
+
+        // Test connectivity on load
+        setTimeout(async () => {
+            try {
+                const response = await fetch(API_ENDPOINT, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: 'debug',
+                        session_id: sessionId
+                    })
+                });
+                
+                if (response.ok) {
+                    setConnectionStatus('connected', '🟢 API Connected');
+                } else {
+                    setConnectionStatus('error', '🔴 API Issues');
+                }
+            } catch (error) {
+                setConnectionStatus('error', '🔴 No Connection');
+            }
+        }, 1000);
+    </script>
+</body>
+</html>

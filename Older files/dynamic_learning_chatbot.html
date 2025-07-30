@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TARs AiGent - Dynamic Learning</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        .chat-container {
+            width: 90%;
+            max-width: 800px;
+            height: 80vh;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .chat-header {
+            background: linear-gradient(135deg, #232526 0%, #414345 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 15px 15px 0 0;
+            text-align: center;
+        }
+        
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: #f8f9fa;
+        }
+        
+        .message {
+            margin: 10px 0;
+            padding: 12px 16px;
+            border-radius: 18px;
+            max-width: 80%;
+            word-wrap: break-word;
+            white-space: pre-line;
+        }
+        
+        .user-message {
+            background: #667eea;
+            color: white;
+            margin-left: auto;
+            text-align: right;
+        }
+        
+        .bot-message {
+            background: white;
+            border: 1px solid #e0e0e0;
+            margin-right: auto;
+        }
+        
+        .suggestions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        
+        .suggestion-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 15px;
+            cursor: pointer;
+            font-size: 0.8em;
+        }
+        
+        .suggestion-btn:hover {
+            background: #5a6fd8;
+        }
+        
+        .chat-input {
+            display: flex;
+            padding: 20px;
+            background: white;
+            border-radius: 0 0 15px 15px;
+            border-top: 1px solid #e0e0e0;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .input-row {
+            display: flex;
+            gap: 10px;
+        }
+        
+        #messageInput {
+            flex: 1;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 25px;
+            outline: none;
+            font-size: 1em;
+        }
+        
+        #messageInput:focus {
+            border-color: #667eea;
+        }
+        
+        #sendBtn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 25px;
+            cursor: pointer;
+        }
+        
+        #sendBtn:hover {
+            background: #5a6fd8;
+        }
+        
+        #fileInput {
+            padding: 8px;
+            border: 2px solid #e0e0e0;
+            border-radius: 15px;
+            background: #f8f9fa;
+        }
+        
+        .upload-info {
+            font-size: 0.8em;
+            color: #666;
+            text-align: center;
+        }
+        
+        .typing {
+            display: none;
+            padding: 12px 16px;
+            color: #666;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>🤖 TARs AiGent - Dynamic Learning</h1>
+            <p>Know your VPC through NLP - Gets smarter over time</p>
+        </div>
+        
+        <div class="chat-messages" id="chatMessages">
+            <div class="message bot-message">
+                👋 Hi! I'm a self-learning AI that gets smarter with every interaction. What would you like to do?
+                <div class="suggestions">
+                    <button class="suggestion-btn" onclick="setMessage('List my S3 buckets')">List S3 buckets</button>
+                    <button class="suggestion-btn" onclick="setMessage('Show EC2 instances')">Show EC2 instances</button>
+                    <button class="suggestion-btn" onclick="setMessage('How can you help me with S3?')">S3 Help</button>
+                    <button class="suggestion-btn" onclick="setMessage('seed')">Seed patterns</button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="typing" id="typing">🤖 Processing...</div>
+        
+        <div class="chat-input">
+            <input type="file" id="fileInput" style="display: none;" />
+            <div class="upload-info">💡 I learn from every interaction and get smarter over time!</div>
+            <div class="input-row">
+                <input type="text" id="messageInput" placeholder="Ask about AWS services or type commands..." />
+                <button id="sendBtn" onclick="sendMessage()">Send</button>
+            </div>
+            <button onclick="document.getElementById('fileInput').click()" style="padding: 8px; border: 2px dashed #667eea; background: none; border-radius: 10px; cursor: pointer;">
+                📁 Select File to Upload
+            </button>
+        </div>
+    </div>
+
+    <script>
+        const apiEndpoint = 'https://bige27ofak.execute-api.us-east-1.amazonaws.com/prod/execute';
+        let selectedFile = null;
+        let sessionId = localStorage.getItem('sessionId') || generateUUID();
+        
+        // Store session ID
+        localStorage.setItem('sessionId', sessionId);
+        
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            selectedFile = e.target.files[0];
+            if (selectedFile) {
+                document.getElementById('messageInput').value = `Upload ${selectedFile.name} to bucket `;
+                document.getElementById('messageInput').focus();
+            }
+        });
+        
+        function setMessage(text) {
+            document.getElementById('messageInput').value = text;
+            document.getElementById('messageInput').focus();
+        }
+        
+        function addMessage(content, isUser = false, suggestions = []) {
+            const messagesDiv = document.getElementById('chatMessages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isUser ? 'user-message' : 'bot-message'}`;
+            
+            let messageContent = content;
+            if (suggestions.length > 0) {
+                messageContent += '<div class="suggestions">';
+                suggestions.forEach(suggestion => {
+                    messageContent += `<button class="suggestion-btn" onclick="setMessage('${suggestion}')">${suggestion}</button>`;
+                });
+                messageContent += '</div>';
+            }
+            
+            messageDiv.innerHTML = messageContent;
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+        
+        function showTyping(show) {
+            document.getElementById('typing').style.display = show ? 'block' : 'none';
+            if (show) {
+                document.getElementById('chatMessages').scrollTop = document.getElementById('chatMessages').scrollHeight;
+            }
+        }
+        
+        async function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+            
+            if (!message) return;
+            
+            // Check if it's a clear command
+            if (message.toLowerCase() === 'clear') {
+                document.getElementById('chatMessages').innerHTML = '';
+                input.value = '';
+                return;
+            }
+            
+            // Check if it's an upload command
+            if (message.toLowerCase().includes('upload')) {
+                if (selectedFile) {
+                    await handleFileUpload(message, selectedFile);
+                    return;
+                } else {
+                    addMessage('Please select a file first using the "Select File" button', false);
+                    return;
+                }
+            }
+            
+            // Add user message
+            addMessage(message, true);
+            input.value = '';
+            
+            // Show typing indicator
+            showTyping(true);
+            
+            try {
+                const response = await fetch(apiEndpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        message: message,
+                        session_id: sessionId
+                    })
+                });
+                
+                const data = await response.json();
+                showTyping(false);
+                
+                // Format response
+                let botResponse = formatResponse(data);
+                addMessage(botResponse, false);
+                
+            } catch (error) {
+                showTyping(false);
+                addMessage(`❌ Error: ${error.message}`, false);
+            }
+        }
+        
+        async function handleFileUpload(message, file) {
+            addMessage(`📤 Uploading ${file.name}...`, true);
+            showTyping(true);
+            
+            try {
+                // Convert file to base64
+                const base64 = await fileToBase64(file);
+                
+                const response = await fetch(apiEndpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: message,
+                        file_data: base64,
+                        file_name: file.name,
+                        file_type: file.type,
+                        session_id: sessionId
+                    })
+                });
+                
+                const data = await response.json();
+                showTyping(false);
+                
+                let botResponse = formatResponse(data);
+                addMessage(botResponse, false);
+                
+                // Reset
+                selectedFile = null;
+                document.getElementById('fileInput').value = '';
+                document.getElementById('messageInput').value = '';
+                
+            } catch (error) {
+                showTyping(false);
+                addMessage(`❌ Upload failed: ${error.message}`, false);
+            }
+        }
+        
+        function fileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = () => resolve(reader.result.split(',')[1]);
+                reader.onerror = error => reject(error);
+            });
+        }
+        
+        function formatResponse(data) {
+            if (data.response) return data.response;
+            if (data.error) return `❌ ${data.error}`;
+            return JSON.stringify(data, null, 2);
+        }
+        
+        function generateUUID() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+        
+        // Enter key support
+        document.getElementById('messageInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>

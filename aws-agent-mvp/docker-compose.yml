@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: aws-agent-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    
+  app:
+    build: ./backend
+    container_name: aws-agent-app
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - AWS_REGION=us-east-1
+    depends_on:
+      - redis
+    volumes:
+      - ~/.aws:/root/.aws:ro  # Mount AWS credentials
+      - ./backend:/app
+      - ./frontend:/app/frontend
+    working_dir: /app
+
+volumes:
+  redis_data:

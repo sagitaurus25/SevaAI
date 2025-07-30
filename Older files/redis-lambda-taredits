@@ -1,0 +1,1210 @@
+import json
+import boto3
+import redis
+import uuid
+import hashlib
+from datetime import datetime, timedelta
+import os
+
+# AWS clients
+bedrock = boto3.client('bedrock-runtime', region_name='us-east-1')
+s3 = boto3.client('s3')
+dynamodb = boto3.resource('dynamodb')
+
+# Redis connection (will be set after cluster is ready)
+redis_client = None
+
+def seed_common_patterns():
+    """Seed DynamoDB with common patterns"""
+    common_patterns = [
+        {"query": "list files", "pattern": {"action": "list", "resource": "objects"}},
+        {"query": "list objects", "pattern": {"action": "list", "resource": "objects"}},
+        {"query": "show files", "pattern": {"action": "list", "resource": "objects"}},
+        {"query": "list buckets", "pattern": {"action": "list", "resource": "buckets"}},
+        {"query": "show buckets", "pattern": {"action": "list", "resource": "buckets"}}
+    ]
+    
+    for item in common_patterns:
+        try:
+            store_learned_pattern(item["query"], item["pattern"])
+        except:
+            pass  # Ignore errors during seeding
+
+def lambda_handler(event, context):
+    """Main Lambda handler with Redis session management"""
+    
+    try:
+        body = json.loads(event.get('body', '{}')) if event.get('body') else {}
+        message = body.get('message', '')
+        session_id = body.get('session_id', str(uuid.uuid4()))
+        ai_model = body.get('ai_model', 'auto')  # Get AI model preference
+        
+        print(f"🤖 Processing: {message} (session: {session_id})")
+        
+        # Debug mode - test connectivity
+        if message.lower() == 'debug':
+            return {
+                'statusCode': 200,
+                'headers': {'Access-Control-Allow-Origin': '*'},
+                'body': json.dumps({
+                    'response': test_vpc_connectivity(),
+                    'session_id': session_id,
+                    'source': 'debug'
+                })
+            }
+        
+        # Initialize Redis connection
+        init_redis()
+        
+        # Seed common patterns on first run
+        if message.lower() == 'seed':
+            seed_common_patterns()
+            return {
+                'statusCode': 200,
+                'headers': {'Access-Control-Allow-Origin': '*'},
+                'body': json.dumps({
+                    'response': '🌱 Common patterns seeded',
+                    'session_id': session_id,
+                    'source': 'seed'
+                })
+            }
+        
+        # Get or create session
+        session = get_session(session_id)
+        
+        # Process message based on session state
+        if session.get('state') == 'WAITING':
+            result = handle_followup_response(message, session)
+        else:
+            result = handle_new_query(message, session, ai_model)
+        
+        # Update session
+        update_session(session_id, session, result)
+        
+        return {
+            'statusCode': 200,
+            'headers': {'Access-Control-Allow-Origin': '*'},
+            'body': json.dumps({
+                'response': result,
+                'session_id': session_id,
+                'session_state': session.get('state', 'IDLE'),
+                'source': 'redis_session'
+            })
+        }
+        
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        return {
+            'statusCode': 200,
+            'headers': {'Access-Control-Allow-Origin': '*'},
+            'body': json.dumps({
+                'response': f'Error: {str(e)}',
+                'session_id': session_id,
+                'source': 'error'
+            })
+        }
+
+def init_redis():
+    """Initialize Redis connection"""
+    global redis_client
+    
+    if redis_client is None:
+        # For now, use placeholder - will update with actual endpoint
+        redis_endpoint = os.environ.get('REDIS_ENDPOINT', 'localhost')
+        redis_port = int(os.environ.get('REDIS_PORT', '6379'))
+        
+        try:
+            redis_client = redis.Redis(
+                host=redis_endpoint,
+                port=redis_port,
+                decode_responses=True,
+                socket_timeout=5,
+                socket_connect_timeout=5
+            )
+            # Test connection
+            redis_client.ping()
+            print(f"✅ Redis connected: {redis_endpoint}:{redis_port}")
+        except Exception as e:
+            print(f"❌ Redis connection failed: {e}")
+            redis_client = None
+
+def get_session(session_id):
+    """Get session from DynamoDB or create new one"""
+    try:
+        table = dynamodb.Table('conversation-context')
+        response = table.get_item(Key={'session_id': session_id})
+        
+        if 'Item' in response:
+            session = response['Item']
+            last_update = datetime.fromisoformat(session.get('last_activity', '2000-01-01T00:00:00'))
+            if (datetime.now() - last_update).seconds < 600:  # 10 minutes
+                print(f"📱 Retrieved session: {session}")
+                return session
+        
+        # Create new session
+        session = {
+            'session_id': session_id,
+            'state': 'IDLE',
+            'context': {},
+            'created_at': datetime.now().isoformat(),
+            'last_activity': datetime.now().isoformat()
+        }
+        print(f"📱 Created new session: {session_id}")
+        return session
+        
+    except Exception as e:
+        print(f"❌ Session retrieval error: {e}")
+        return {'session_id': session_id, 'state': 'IDLE', 'context': {}}
+
+def update_session(session_id, session, result):
+    """Update session in DynamoDB"""
+    try:
+        session['last_activity'] = datetime.now().isoformat()
+        
+        # Determine new state based on result
+        if isinstance(result, str) and any(word in result.lower() for word in ['which', 'what', 'specify']):
+            session['state'] = 'WAITING'
+        else:
+            session['state'] = 'IDLE'
+            session['context'] = {}  # Clear context after successful execution
+        
+        # Store session in DynamoDB
+        table = dynamodb.Table('conversation-context')
+        table.put_item(Item=session)
+        print(f"💾 Session updated: {session_id} (state: {session['state']})")
+        
+    except Exception as e:
+        print(f"❌ Session update error: {e}")
+
+def handle_new_query(message, session, ai_model='auto'):
+    """Handle new query - check cache, then DynamoDB, then AI model"""
+    
+    # 1. Check Redis hot patterns cache
+    cached_pattern = get_cached_pattern(message)
+    if cached_pattern:
+        print("⚡ Using cached pattern")
+        return execute_command(cached_pattern, session, message)
+    
+    # 2. Check DynamoDB learned patterns
+    learned_pattern = get_learned_pattern(message)
+    if learned_pattern:
+        print("📚 Using learned pattern")
+        cache_pattern(message, learned_pattern)  # Cache for next time
+        return execute_command(learned_pattern, session, message)
+    
+    # 3. Ask AI Model
+    print(f"🧠 Asking AI Model ({ai_model})")
+    ai_result = ask_ai_model(message, ai_model)
+    
+    if ai_result.get('needs_followup'):
+        # Store context for follow-up (remove confidence to avoid DynamoDB float error)
+        partial_command = ai_result.get('partial_command', {})
+        if 'confidence' in partial_command:
+            del partial_command['confidence']
+        
+        session['context'] = {
+            'waiting_for': determine_waiting_for(ai_result.get('question', '')),
+            'partial_command': partial_command
+        }
+        session['last_query'] = message  # Store the original query
+        print(f"💾 Stored context: {session['context']}")
+        return ai_result.get('question', 'I need more information')
+    else:
+        # Store successful pattern
+        store_learned_pattern(message, ai_result)
+        cache_pattern(message, ai_result)
+        return execute_command(ai_result, session, message)
+
+def handle_followup_response(message, session):
+    """Handle follow-up response using session context"""
+    
+    context = session.get('context', {})
+    waiting_for = context.get('waiting_for')
+    partial_command = context.get('partial_command', {})
+    
+    print(f"🔗 Handling followup: waiting for {waiting_for}")
+    print(f"🔗 Partial command: {partial_command}")
+    print(f"🔗 User response: {message}")
+    
+    # Complete the command
+    if waiting_for == 'bucket_name':
+        partial_command['bucket'] = message.strip()
+        print(f"🔗 Updated command: {partial_command}")
+    elif waiting_for == 'resource':
+        # Handle resource follow-up - assume they want to list objects in the bucket they named
+        partial_command['bucket'] = message.strip()
+        partial_command['resource'] = 'objects'
+        print(f"🔗 Updated command: {partial_command}")
+    elif waiting_for == 'dest_bucket':
+        partial_command['dest_bucket'] = message.strip()
+        print(f"🔗 Updated command: {partial_command}")
+    elif waiting_for == 'source_bucket':
+        partial_command['source_bucket'] = message.strip()
+        print(f"🔗 Updated command: {partial_command}")
+    elif waiting_for == 'object_name':
+        partial_command['source_key'] = message.strip()
+        print(f"🔗 Updated command: {partial_command}")
+    
+    # Execute completed command
+    result = execute_command(partial_command)
+    print(f"🔗 Execution result: {result}")
+    
+    return result
+
+def get_cached_pattern(message):
+    """Get pattern from Redis cache"""
+    try:
+        if redis_client:
+            pattern_data = redis_client.get(f"pattern:{hash_message(message)}")
+            if pattern_data:
+                return json.loads(pattern_data)
+        return None
+    except Exception as e:
+        print(f"❌ Cache retrieval error: {e}")
+        return None
+
+def cache_pattern(message, pattern):
+    """Cache pattern in Redis"""
+    try:
+        if redis_client:
+            redis_client.setex(
+                f"pattern:{hash_message(message)}",
+                86400,  # 24 hours
+                json.dumps(pattern)
+            )
+            print(f"⚡ Cached pattern: {message}")
+    except Exception as e:
+        print(f"❌ Cache storage error: {e}")
+
+def hash_message(message):
+    """Create hash for message"""
+    return hashlib.md5(message.lower().strip().encode()).hexdigest()[:8]
+
+def get_learned_pattern(message):
+    """Get pattern from DynamoDB"""
+    try:
+        table = dynamodb.Table('parsing-patterns')
+        response = table.scan(
+            FilterExpression='#q = :query AND success_rate > :rate',
+            ExpressionAttributeNames={'#q': 'query'},
+            ExpressionAttributeValues={':query': message, ':rate': 0.8},
+            Limit=1
+        )
+        
+        if response['Items']:
+            item = response['Items'][0]
+            parsed_result = item.get('parsed_result', {})
+            
+            # Handle DynamoDB format conversion
+            if isinstance(parsed_result, dict) and 'M' in parsed_result:
+                parsed_result = convert_dynamodb_format(parsed_result)
+            
+            return parsed_result
+        
+        return None
+        
+    except Exception as e:
+        print(f"📚 DynamoDB error: {e}")
+        return None
+
+def ask_ai_model(message, ai_model='auto'):
+    """Ask AI model for parsing based on user preference"""
+    
+    if ai_model == 'claude':
+        # Force Claude Haiku
+        print("🌊 User selected Claude Haiku")
+        claude_result = try_claude_haiku(message)
+        if claude_result:
+            return claude_result
+    elif ai_model == 'nova':
+        # Force Nova Micro only
+        print("🧠 User selected Nova Micro only")
+        nova_result = try_nova_micro(message)
+        if nova_result:
+            return nova_result
+    else:
+        # Auto mode (Nova -> Claude fallback)
+        nova_result = try_nova_micro(message)
+        if nova_result:
+            return nova_result
+        
+        print("🔄 Nova failed, trying Claude Haiku fallback")
+        claude_result = try_claude_haiku(message)
+        if claude_result:
+            return claude_result
+    
+    return {
+        "needs_followup": True, 
+        "question": f"I need help understanding: '{message}'. Can you rephrase?",
+        "partial_command": {}
+    }
+
+def try_nova_micro(message):
+    """Try Nova Micro parsing"""
+    
+    prompt = f"""Parse this AWS command: "{message}"
+
+Return JSON with:
+- For list: {{"action": "list", "resource": "buckets|objects"}}
+- For file operations: {{"action": "copy|delete|move|rename|restore", "raw_command": "{message}"}}
+- For other: {{"action": "unknown"}}
+
+Examples:
+"list buckets" -> {{"action": "list", "resource": "buckets"}}
+"list files" -> {{"action": "list", "resource": "objects"}}
+"copy file.txt" -> {{"action": "copy", "raw_command": "copy file.txt"}}
+"delete file.txt" -> {{"action": "delete", "raw_command": "delete file.txt"}}
+"move file.txt" -> {{"action": "move", "raw_command": "move file.txt"}}
+"rename file.txt" -> {{"action": "rename", "raw_command": "rename file.txt"}}
+"restore file.txt" -> {{"action": "restore", "raw_command": "restore file.txt"}}
+"enable versioning bucket" -> {{"action": "enable", "raw_command": "enable versioning bucket"}}
+"enable versioning tarbucket102424" -> {{"action": "enable", "raw_command": "enable versioning tarbucket102424"}}
+"enable versioning aws-agent-web-ui-tar2" -> {{"action": "enable", "raw_command": "enable versioning aws-agent-web-ui-tar2"}}
+"create bucket new-bucket" -> {{"action": "create", "raw_command": "create bucket new-bucket"}}
+"show bucket info bucket-name" -> {{"action": "show", "raw_command": "show bucket info bucket-name"}}
+"download bucket/file.txt" -> {{"action": "download", "raw_command": "download bucket/file.txt"}}
+"set file public bucket/file.txt" -> {{"action": "set", "raw_command": "set file public bucket/file.txt"}}
+"search files containing report" -> {{"action": "search", "raw_command": "search files containing report"}}
+"search files containing elevate" -> {{"action": "search", "raw_command": "search files containing elevate"}}
+"Search files containing Single" -> {{"action": "search", "raw_command": "Search files containing Single"}}
+"restore file.txt" -> {{"action": "restore", "raw_command": "restore file.txt"}}
+
+Return only JSON:"""
+
+    try:
+        import socket
+        socket.setdefaulttimeout(10)  # 10 second timeout
+        
+        response = bedrock.invoke_model(
+            modelId='amazon.nova-micro-v1:0',
+            body=json.dumps({
+                "messages": [{"role": "user", "content": [{"text": prompt}]}],
+                "inferenceConfig": {"maxTokens": 200, "temperature": 0.1}
+            })
+        )
+        
+        result = json.loads(response['body'].read())
+        nova_response = result['output']['message']['content'][0]['text'].strip()
+        
+        if '{' in nova_response:
+            json_start = nova_response.find('{')
+            json_end = nova_response.rfind('}') + 1
+            json_str = nova_response[json_start:json_end]
+            parsed = json.loads(json_str)
+            print(f"🧠 Nova parsed: {parsed}")
+            return parsed
+        
+    except Exception as e:
+        print(f"🧠 Nova error: {e}")
+    
+    return None
+
+def try_claude_haiku(message):
+    """Try Claude Haiku as fallback"""
+    prompt = f"""You are an awesome AWS S3 command parser. Parse this command: "{message}"
+
+RETURN ONLY JSON in this exact format:
+
+For LIST commands (show, display, get buckets/files/objects):
+{{"action": "list", "resource": "buckets"}} OR {{"action": "list", "resource": "objects"}}
+
+For FILE operations (copy, delete, move, rename, restore, download, set, search):
+{{"action": "ACTION_NAME", "raw_command": "{message}"}}
+
+For BUCKET operations (create, enable, show info):
+{{"action": "ACTION_NAME", "raw_command": "{message}"}}
+
+For UNKNOWN:
+{{"action": "unknown"}}
+
+EXAMPLES:
+"show all my S3 buckets" -> {{"action": "list", "resource": "buckets"}}
+"list files in bucket" -> {{"action": "list", "resource": "objects"}}
+"copy the file from bucket1 to bucket2" -> {{"action": "copy", "raw_command": "copy the file from bucket1 to bucket2"}}
+"enable versioning on my-bucket" -> {{"action": "enable", "raw_command": "enable versioning on my-bucket"}}
+"search for files containing logo" -> {{"action": "search", "raw_command": "search for files containing logo"}}
+"delete that file" -> {{"action": "delete", "raw_command": "delete that file"}}
+
+IMPORTANT: Return ONLY the JSON object, no other text."""
+
+    try:
+        response = bedrock.invoke_model(
+            modelId='anthropic.claude-3-5-sonnet-20240620-v1:0',
+            body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 200,
+                "temperature": 0.1
+            })
+        )
+        
+        result = json.loads(response['body'].read())
+        claude_response = result['content'][0]['text'].strip()
+        
+        if '{' in claude_response:
+            json_start = claude_response.find('{')
+            json_end = claude_response.rfind('}') + 1
+            json_str = claude_response[json_start:json_end]
+            parsed = json.loads(json_str)
+            print(f"🌊 Claude 3.5 Sonnet parsed: {parsed}")
+            return parsed
+        
+    except Exception as e:
+        print(f"🌊 Claude error: {e}")
+    
+    return None
+
+def execute_command(command, session=None, original_message=''):
+    """Execute AWS command"""
+    action = command.get('action')
+    
+    if action == 'list':
+        resource = command.get('resource')
+        bucket = command.get('bucket')
+        
+        # Handle list commands
+        if resource == 'buckets':
+            return list_s3_buckets()
+        elif resource == 'objects':
+            if bucket:
+                return list_s3_objects(bucket)
+            else:
+                # Store context for follow-up
+                session['context'] = {
+                    'waiting_for': 'bucket_name',
+                    'partial_command': {'action': 'list', 'resource': 'objects'}
+                }
+                session['state'] = 'WAITING'
+                print(f"💾 List objects context stored: {session['context']}")
+                return "🤖 Which bucket should I list objects from?"
+        else:
+            return "🤖 List format: 'list buckets' or 'list files'<br>Examples:<br>• 'list buckets' - shows all S3 buckets<br>• 'list files' - asks which bucket to list objects from"
+    
+    elif action == 'copy':
+        raw_command = command.get('raw_command', '')
+        return parse_and_execute_copy(raw_command)
+    
+    elif action == 'delete':
+        raw_command = command.get('raw_command', '')
+        return parse_and_execute_delete(raw_command)
+    
+    elif action == 'move':
+        raw_command = command.get('raw_command', '')
+        return parse_and_execute_move(raw_command)
+    
+    elif action == 'rename':
+        raw_command = command.get('raw_command', '')
+        return parse_and_execute_rename(raw_command)
+    
+    elif action == 'restore':
+        raw_command = command.get('raw_command', '')
+        return parse_and_execute_restore(raw_command)
+    
+    elif action == 'enable':
+        raw_command = command.get('raw_command', '')
+        return parse_and_execute_enable(raw_command)
+    
+    elif action == 'create':
+        raw_command = command.get('raw_command', '')
+        return parse_and_execute_create(raw_command)
+    
+    elif action == 'show':
+        raw_command = command.get('raw_command', '')
+        return parse_and_execute_show(raw_command)
+    
+    elif action == 'download':
+        raw_command = command.get('raw_command', '')
+        return parse_and_execute_download(raw_command)
+    
+    elif action == 'set':
+        raw_command = command.get('raw_command', '')
+        return parse_and_execute_set(raw_command)
+    
+    elif action == 'search':
+        raw_command = command.get('raw_command', '')
+        return parse_and_execute_search(raw_command)
+    
+    if action == 'unknown':
+        return provide_contextual_help(command, original_message)
+    else:
+        return f"🤖 Command '{action}' not implemented yet"
+
+def determine_waiting_for(question):
+    """Determine what we're waiting for based on question"""
+    question_lower = question.lower()
+    if 'resource to list' in question_lower:
+        return 'resource'
+    elif 'source bucket' in question_lower:
+        return 'source_bucket'
+    elif 'destination bucket' in question_lower:
+        return 'dest_bucket'
+    elif 'bucket' in question_lower:
+        return 'bucket_name'
+    elif 'object' in question_lower or 'file' in question_lower:
+        return 'object_name'
+    else:
+        return 'unknown'
+
+def store_learned_pattern(message, pattern):
+    """Store successful pattern in DynamoDB"""
+    try:
+        # Clean pattern - remove any problematic fields
+        clean_pattern = {}
+        for key, value in pattern.items():
+            if key not in ['confidence'] and not isinstance(value, float):
+                clean_pattern[key] = value
+        
+        pattern_key = hashlib.md5(f"{message}_{json.dumps(clean_pattern, sort_keys=True)}".encode()).hexdigest()
+        
+        table = dynamodb.Table('parsing-patterns')
+        from decimal import Decimal
+        table.put_item(Item={
+            'pattern_id': pattern_key,
+            'query': message,
+            'parsed_result': clean_pattern,
+            'success_count': 1,
+            'failure_count': 0,
+            'success_rate': Decimal('1.0'),
+            'created_at': datetime.now().isoformat(),
+            'last_used': datetime.now().isoformat(),
+            'source': 'semantic_approach'
+        })
+        print(f"📚 Stored pattern: {message}")
+        
+    except Exception as e:
+        print(f"📚 Pattern storage error: {e}")
+
+def convert_dynamodb_format(dynamodb_item):
+    """Convert DynamoDB format to regular dict"""
+    if 'M' in dynamodb_item:
+        result = {}
+        for key, value in dynamodb_item['M'].items():
+            if 'S' in value:
+                result[key] = value['S']
+            elif 'N' in value:
+                result[key] = int(value['N']) if value['N'].isdigit() else int(float(value['N']))
+        return result
+    return dynamodb_item
+
+def list_s3_buckets():
+    """List S3 buckets"""
+    try:
+        response = s3.list_buckets()
+        buckets = response['Buckets']
+        
+        result = f"📦 Found {len(buckets)} S3 buckets:<br>"
+        for bucket in buckets:
+            date_str = bucket['CreationDate'].strftime('%Y-%m-%d')
+            result += f"• <strong>{bucket['Name']}</strong> ({date_str})<br>"
+        
+        return result
+    except Exception as e:
+        return f"❌ Error listing buckets: {str(e)}"
+
+def list_s3_objects(bucket_name):
+    """List objects in S3 bucket"""
+    try:
+        response = s3.list_objects_v2(Bucket=bucket_name, MaxKeys=10)
+        
+        if 'Contents' not in response:
+            return f"📦 Bucket '{bucket_name}' is empty"
+        
+        objects = response['Contents']
+        result = f"📄 Found {len(objects)} objects in <strong>{bucket_name}</strong>:<br>"
+        
+        for obj in objects:
+            size = obj['Size']
+            date = obj['LastModified'].strftime('%Y-%m-%d')
+            result += f"• <strong>{obj['Key']}</strong> ({size} bytes, {date})<br>"
+        
+        return result
+        
+    except Exception as e:
+        return f"❌ Error accessing {bucket_name}: {str(e)}"
+
+def copy_s3_object(source_bucket, source_key, dest_bucket, dest_key):
+    """Copy S3 object from source to destination"""
+    try:
+        print(f"🔍 Attempting copy: s3://{source_bucket}/{source_key} -> s3://{dest_bucket}/{dest_key}")
+        
+        copy_source = {'Bucket': source_bucket, 'Key': source_key}
+        s3.copy_object(CopySource=copy_source, Bucket=dest_bucket, Key=dest_key)
+        
+        return f"✅ Successfully copied <strong>{source_key}</strong><br>From: {source_bucket}<br>To: {dest_bucket}"
+        
+    except Exception as e:
+        print(f"❌ Copy error details: {str(e)}")
+        return f"❌ Copy failed: {str(e)}"
+
+def parse_and_execute_copy(raw_command):
+    """Parse copy command and execute"""
+    try:
+        # Handle: "copy source-bucket/file to dest-bucket"
+        if ' to ' in raw_command:
+            parts = raw_command.split(' to ')
+            source_part = parts[0].replace('copy ', '').strip()
+            dest_bucket = parts[1].strip()
+            
+            # Parse source: bucket/path
+            if '/' in source_part:
+                source_bucket, source_key = source_part.split('/', 1)
+                return copy_s3_object(source_bucket, source_key, dest_bucket, source_key)
+            else:
+                return f"🤖 Copy format: 'copy source-bucket/filename to dest-bucket'"
+        else:
+            # Incomplete copy command - guide user with specific format
+            if raw_command.strip() == 'copy':
+                return f"🤖 Copy format: 'copy source-bucket/filename to dest-bucket'<br>Example: 'copy tarbucket102424/test.txt to tar-books25'"
+            else:
+                # Extract what they provided and show what's missing
+                source_part = raw_command.replace('copy ', '').strip()
+                if '/' in source_part:
+                    return f"🤖 Missing destination. Try: '{raw_command} to dest-bucket'<br>Example: '{raw_command} to tar-books25'"
+                else:
+                    return f"🤖 Copy format: 'copy source-bucket/filename to dest-bucket'<br>You provided: '{raw_command}'<br>Example: 'copy tarbucket102424/test.txt to tar-books25'"
+            
+    except Exception as e:
+        return f"🤖 Copy parsing error: {str(e)}"
+
+def detect_intent(message):
+    """Detect user intent from original message"""
+    msg = message.lower().strip()
+    if msg.startswith('list'): return 'list'
+    if msg.startswith('copy'): return 'copy'
+    if msg.startswith('move'): return 'move'
+    if msg.startswith('delete'): return 'delete'
+    if msg.startswith('rename'): return 'rename'
+    if msg.startswith('restore'): return 'restore'
+    if msg.startswith('enable'): return 'enable'
+    if msg.startswith('create'): return 'create'
+    if msg.startswith('download'): return 'download'
+    if msg.startswith('set'): return 'set'
+    if msg.startswith('search'): return 'search'
+    if msg.startswith('show'): return 'show'
+    return 'unknown'
+
+def provide_contextual_help(command, original_message):
+    """Provide contextual help based on detected intent"""
+    intent = detect_intent(original_message)
+    
+    # Contextual suggestions based on user intent
+    if intent == 'list':
+        return f"🤖 '{original_message}' Are you trying to list buckets or objects. Try:<br>• 'list buckets' - show all S3 buckets<br>• 'list files' - show files in a bucket"
+    
+    elif intent == 'copy':
+        return f"🤖 '{original_message}' Are you trying to copy. Try:<br>• 'copy source-bucket/file.txt to dest-bucket' - copy files between buckets"
+    
+    elif intent == 'delete':
+        return f"🤖 '{original_message}' Are you trying to delete an object. Try:<br>• 'delete bucket/file.txt' - delete specific file"
+    
+    elif intent == 'move':
+        return f"🤖 '{original_message}' Are you trying to move an object. Try:<br>• 'move source-bucket/file.txt to dest-bucket' - move files between buckets"
+    
+    elif intent == 'rename':
+        return f"🤖 for '{original_message}'  'Try: rename bucket/old.txt to new.txt' - rename file in same bucket"
+    
+    elif intent == 'restore':
+        return f"🤖 for '{original_message}'  'restore bucket/filename' - restore deleted file from previous version"
+    
+    elif intent == 'enable':
+        return f"🤖 for '{original_message}'  'enable versioning bucket-name' - enable versioning for restore protection"
+    
+    elif intent == 'create':
+        return f"🤖 for '{original_message}' 'create bucket new-bucket-name' - create new S3 bucket"
+    
+    elif intent == 'show':
+        return f"🤖 for '{original_message}' 'show bucket info bucket-name' - show bucket details and statistics"
+    
+    elif intent == 'download':
+        return f"🤖 for '{original_message}' 'download bucket/filename' - generate download link for file"
+    
+    elif intent == 'set':
+        return f"🤖 '{original_message}' is incomplete. Try:<br>• 'set file public bucket/filename' - make file publicly accessible"
+    
+    elif intent == 'search':
+        return f"🤖 '{original_message}' is incomplete. Try:<br>• 'search files containing keyword' - search file names by pattern"
+    
+    else:
+        # Generic help for completely unknown commands
+        return f"🤖 I don't understand '{original_message}'. Available commands:<br>• 'list buckets' - show all buckets<br>• 'list files' - show files in a bucket<br>• 'copy bucket/file to dest-bucket' - copy files"
+
+def parse_and_execute_delete(raw_command):
+    """Parse delete command and execute"""
+    try:
+        # Handle: "delete bucket/file.txt"
+        if raw_command.strip() == 'delete':
+            return f"🤖 Delete format: 'delete bucket/filename'<br>Example: 'delete tarbucket102424/test.txt'"
+        
+        file_part = raw_command.replace('delete ', '').strip()
+        if '/' in file_part:
+            bucket, key = file_part.split('/', 1)
+            return delete_s3_object(bucket, key)
+        else:
+            return f"🤖 Delete format: 'delete bucket/filename'<br>Example: 'delete tarbucket102424/test.txt'"
+            
+    except Exception as e:
+        return f"🤖 Delete parsing error: {str(e)}"
+
+def parse_and_execute_move(raw_command):
+    """Parse move command and execute"""
+    try:
+        # Handle: "move source-bucket/file to dest-bucket"
+        if ' to ' in raw_command:
+            parts = raw_command.split(' to ')
+            source_part = parts[0].replace('move ', '').strip()
+            dest_bucket = parts[1].strip()
+            
+            if '/' in source_part:
+                source_bucket, source_key = source_part.split('/', 1)
+                # Move = Copy + Delete
+                copy_result = copy_s3_object(source_bucket, source_key, dest_bucket, source_key)
+                if '✅' in copy_result:  # Success
+                    delete_result = delete_s3_object(source_bucket, source_key)
+                    return f"✅ Successfully moved <strong>{source_key}</strong><br>From: {source_bucket}<br>To: {dest_bucket}"
+                else:
+                    return copy_result  # Return copy error
+            else:
+                return f"🤖 Move format: 'move source-bucket/filename to dest-bucket'"
+        else:
+            return f"🤖 Move format: 'move source-bucket/filename to dest-bucket'<br>Example: 'move tarbucket102424/test.txt to tar-books25'"
+            
+    except Exception as e:
+        return f"🤖 Move parsing error: {str(e)}"
+
+def parse_and_execute_rename(raw_command):
+    """Parse rename command and execute"""
+    try:
+        # Handle: "rename bucket/old.txt to new.txt"
+        if ' to ' in raw_command:
+            parts = raw_command.split(' to ')
+            source_part = parts[0].replace('rename ', '').strip()
+            new_name = parts[1].strip()
+            
+            if '/' in source_part:
+                bucket, old_key = source_part.split('/', 1)
+                # Rename = Copy to new name + Delete old
+                copy_result = copy_s3_object(bucket, old_key, bucket, new_name)
+                if '✅' in copy_result:  # Success
+                    delete_result = delete_s3_object(bucket, old_key)
+                    return f"✅ Successfully renamed <strong>{old_key}</strong> to <strong>{new_name}</strong><br>In bucket: {bucket}"
+                else:
+                    return copy_result  # Return copy error
+            else:
+                return f"🤖 Rename format: 'rename bucket/old-name to new-name'"
+        else:
+            return f"🤖 Rename format: 'rename bucket/old-name to new-name'<br>Example: 'rename tarbucket102424/old.txt to new.txt'"
+            
+    except Exception as e:
+        return f"🤖 Rename parsing error: {str(e)}"
+
+def delete_s3_object(bucket_name, key):
+    """Delete S3 object"""
+    try:
+        print(f"🔍 Attempting delete: s3://{bucket_name}/{key}")
+        s3.delete_object(Bucket=bucket_name, Key=key)
+        return f"✅ Successfully deleted <strong>{key}</strong><br>From bucket: {bucket_name}"
+        
+    except Exception as e:
+        print(f"❌ Delete error details: {str(e)}")
+        return f"❌ Delete failed: {str(e)}"
+
+def parse_and_execute_restore(raw_command):
+    """Parse restore command and execute"""
+    try:
+        # Handle: "restore bucket/file.txt"
+        if raw_command.strip() == 'restore':
+            return f"🤖 Restore format: 'restore bucket/filename'<br>Example: 'restore tarbucket102424/deleted-file.txt'"
+        
+        file_part = raw_command.replace('restore ', '').strip()
+        if '/' in file_part:
+            bucket, key = file_part.split('/', 1)
+            return restore_s3_object(bucket, key)
+        else:
+            return f"🤖 Restore format: 'restore bucket/filename'<br>Example: 'restore tarbucket102424/deleted-file.txt'"
+            
+    except Exception as e:
+        return f"🤖 Restore parsing error: {str(e)}"
+
+def restore_s3_object(bucket_name, key):
+    """Restore S3 object from previous version"""
+    try:
+        print(f"🔍 Attempting restore: s3://{bucket_name}/{key}")
+        
+        # Check if versioning is enabled
+        versioning = s3.get_bucket_versioning(Bucket=bucket_name)
+        if versioning.get('Status') != 'Enabled':
+            return f"❌ Cannot restore: Bucket '{bucket_name}' does not have versioning enabled<br>Enable versioning first to protect against future deletions"
+        
+        # List object versions to find the latest non-delete marker
+        response = s3.list_object_versions(Bucket=bucket_name, Prefix=key)
+        
+        # Find the latest version that's not a delete marker
+        latest_version = None
+        for version in response.get('Versions', []):
+            if version['Key'] == key and not version.get('IsLatest', False):
+                latest_version = version['VersionId']
+                break
+        
+        if not latest_version:
+            # Check if there are delete markers to remove
+            delete_markers = [dm for dm in response.get('DeleteMarkers', []) if dm['Key'] == key]
+            if delete_markers:
+                # Remove the delete marker to restore the file
+                latest_delete_marker = delete_markers[0]['VersionId']
+                s3.delete_object(Bucket=bucket_name, Key=key, VersionId=latest_delete_marker)
+                return f"✅ Successfully restored <strong>{key}</strong><br>In bucket: {bucket_name}<br>Removed delete marker to restore file"
+            else:
+                return f"❌ No previous versions found for <strong>{key}</strong><br>File may have been permanently deleted or never existed"
+        
+        # Copy the previous version to become the current version
+        copy_source = {'Bucket': bucket_name, 'Key': key, 'VersionId': latest_version}
+        s3.copy_object(CopySource=copy_source, Bucket=bucket_name, Key=key)
+        
+        return f"✅ Successfully restored <strong>{key}</strong><br>In bucket: {bucket_name}<br>Restored from version: {latest_version[:8]}..."
+        
+    except Exception as e:
+        print(f"❌ Restore error details: {str(e)}")
+        if 'NoSuchBucket' in str(e):
+            return f"❌ Bucket '{bucket_name}' does not exist"
+        elif 'AccessDenied' in str(e):
+            return f"❌ Access denied. Need s3:GetObjectVersion and s3:PutObject permissions"
+        else:
+            return f"❌ Restore failed: {str(e)}"
+
+def parse_and_execute_enable(raw_command):
+    """Parse enable command and execute"""
+    try:
+        # Handle: "enable versioning bucket-name"
+        if 'versioning' in raw_command.lower():
+            bucket_part = raw_command.lower().replace('enable versioning', '').strip()
+            if bucket_part:
+                return enable_bucket_versioning(bucket_part)
+            else:
+                return f"🤖 Enable versioning format: 'enable versioning bucket-name'<br>Example: 'enable versioning tar-books25'"
+        else:
+            return f"🤖 Enable format: 'enable versioning bucket-name'<br>Example: 'enable versioning tar-books25'"
+            
+    except Exception as e:
+        return f"🤖 Enable parsing error: {str(e)}"
+
+def enable_bucket_versioning(bucket_name):
+    """Enable versioning on S3 bucket"""
+    try:
+        print(f"🔍 Enabling versioning on: {bucket_name}")
+        
+        # Check current versioning status
+        current_status = s3.get_bucket_versioning(Bucket=bucket_name)
+        if current_status.get('Status') == 'Enabled':
+            return f"✅ Versioning already enabled on <strong>{bucket_name}</strong><br>Files are protected against accidental deletion"
+        
+        # Enable versioning
+        s3.put_bucket_versioning(
+            Bucket=bucket_name,
+            VersioningConfiguration={'Status': 'Enabled'}
+        )
+        
+        return f"✅ Successfully enabled versioning on <strong>{bucket_name}</strong><br>Future file deletions can now be restored with 'restore bucket/filename'"
+        
+    except Exception as e:
+        print(f"❌ Enable versioning error: {str(e)}")
+        if 'NoSuchBucket' in str(e):
+            return f"❌ Bucket '{bucket_name}' does not exist"
+        elif 'AccessDenied' in str(e):
+            return f"❌ Access denied. Need s3:PutBucketVersioning permission"
+        else:
+            return f"❌ Enable versioning failed: {str(e)}"
+
+def parse_and_execute_create(raw_command):
+    """Parse create command and execute"""
+    try:
+        # Handle: "create bucket bucket-name"
+        if 'bucket' in raw_command.lower():
+            bucket_part = raw_command.lower().replace('create bucket', '').strip()
+            if bucket_part:
+                return create_s3_bucket(bucket_part)
+            else:
+                return f"🤖 Create bucket format: 'create bucket bucket-name'<br>Example: 'create bucket my-new-bucket-2025'"
+        else:
+            return f"🤖 Create format: 'create bucket bucket-name'<br>Example: 'create bucket my-new-bucket-2025'"
+            
+    except Exception as e:
+        return f"🤖 Create parsing error: {str(e)}"
+
+def parse_and_execute_show(raw_command):
+    """Parse show command and execute"""
+    try:
+        # Handle: "show bucket info bucket-name"
+        if 'bucket info' in raw_command.lower():
+            bucket_part = raw_command.lower().replace('show bucket info', '').strip()
+            if bucket_part:
+                return show_bucket_info(bucket_part)
+            else:
+                return f"🤖 Show bucket info format: 'show bucket info bucket-name'<br>Example: 'show bucket info tar-books25'"
+        else:
+            return f"🤖 Show format: 'show bucket info bucket-name'<br>Example: 'show bucket info tar-books25'"
+            
+    except Exception as e:
+        return f"🤖 Show parsing error: {str(e)}"
+
+def create_s3_bucket(bucket_name):
+    """Create new S3 bucket"""
+    try:
+        print(f"🔍 Creating bucket: {bucket_name}")
+        
+        # Check if bucket already exists
+        try:
+            s3.head_bucket(Bucket=bucket_name)
+            return f"❌ Bucket <strong>{bucket_name}</strong> already exists<br>Choose a different name"
+        except:
+            pass  # Bucket doesn't exist, proceed with creation
+        
+        # Create bucket
+        s3.create_bucket(Bucket=bucket_name)
+        
+        return f"✅ Successfully created bucket <strong>{bucket_name}</strong><br>Ready for file operations"
+        
+    except Exception as e:
+        print(f"❌ Create bucket error: {str(e)}")
+        if 'BucketAlreadyExists' in str(e):
+            return f"❌ Bucket name '{bucket_name}' is already taken globally<br>Try a more unique name"
+        elif 'InvalidBucketName' in str(e):
+            return f"❌ Invalid bucket name '{bucket_name}'<br>Use lowercase letters, numbers, and hyphens only"
+        elif 'AccessDenied' in str(e):
+            return f"❌ Access denied. Need s3:CreateBucket permission"
+        else:
+            return f"❌ Create bucket failed: {str(e)}"
+
+def show_bucket_info(bucket_name):
+    """Show detailed bucket information"""
+    try:
+        print(f"🔍 Getting info for bucket: {bucket_name}")
+        
+        # Get bucket location
+        location = s3.get_bucket_location(Bucket=bucket_name)
+        region = location.get('LocationConstraint') or 'us-east-1'
+        
+        # Get versioning status
+        versioning = s3.get_bucket_versioning(Bucket=bucket_name)
+        version_status = versioning.get('Status', 'Disabled')
+        
+        # Count objects
+        objects = s3.list_objects_v2(Bucket=bucket_name)
+        object_count = objects.get('KeyCount', 0)
+        
+        # Calculate total size
+        total_size = 0
+        if 'Contents' in objects:
+            total_size = sum(obj['Size'] for obj in objects['Contents'])
+        
+        size_mb = round(total_size / (1024 * 1024), 2) if total_size > 0 else 0
+        
+        return f"📊 Bucket Info: <strong>{bucket_name}</strong><br>" + \
+               f"• Region: {region}<br>" + \
+               f"• Versioning: {version_status}<br>" + \
+               f"• Objects: {object_count}<br>" + \
+               f"• Total Size: {size_mb} MB"
+        
+    except Exception as e:
+        print(f"❌ Show bucket info error: {str(e)}")
+        if 'NoSuchBucket' in str(e):
+            return f"❌ Bucket '{bucket_name}' does not exist"
+        elif 'AccessDenied' in str(e):
+            return f"❌ Access denied. Need s3:GetBucketLocation and s3:ListBucket permissions"
+        else:
+            return f"❌ Show bucket info failed: {str(e)}"
+
+def parse_and_execute_download(raw_command):
+    """Parse download command and execute"""
+    try:
+        # Handle: "download bucket/file.txt"
+        if raw_command.strip() == 'download':
+            return f"🤖 Download format: 'download bucket/filename'<br>Example: 'download tar-books25/document.pdf'"
+        
+        file_part = raw_command.replace('download ', '').strip()
+        if '/' in file_part:
+            bucket, key = file_part.split('/', 1)
+            return generate_download_link(bucket, key)
+        else:
+            return f"🤖 Download format: 'download bucket/filename'<br>Example: 'download tar-books25/document.pdf'"
+            
+    except Exception as e:
+        return f"🤖 Download parsing error: {str(e)}"
+
+def parse_and_execute_set(raw_command):
+    """Parse set command and execute"""
+    try:
+        # Handle: "set file public bucket/file.txt"
+        if 'file public' in raw_command.lower():
+            file_part = raw_command.lower().replace('set file public', '').strip()
+            if '/' in file_part:
+                bucket, key = file_part.split('/', 1)
+                return set_file_public(bucket, key)
+            else:
+                return f"🤖 Set file public format: 'set file public bucket/filename'<br>Example: 'set file public tar-books25/document.pdf'"
+        else:
+            return f"🤖 Set format: 'set file public bucket/filename'<br>Example: 'set file public tar-books25/document.pdf'"
+            
+    except Exception as e:
+        return f"🤖 Set parsing error: {str(e)}"
+
+def parse_and_execute_search(raw_command):
+    """Parse search command and execute"""
+    try:
+        # Handle: "search files containing keyword"
+        if 'files containing' in raw_command.lower():
+            keyword = raw_command.lower().replace('search files containing', '').strip()
+            if keyword:
+                return search_files_by_name(keyword)
+            else:
+                return f"🤖 Search format: 'search files containing keyword'<br>Example: 'search files containing report'"
+        else:
+            return f"🤖 Search format: 'search files containing keyword'<br>Example: 'search files containing report'"
+            
+    except Exception as e:
+        return f"🤖 Search parsing error: {str(e)}"
+
+def generate_download_link(bucket_name, key):
+    """Generate presigned download URL for S3 object"""
+    try:
+        print(f"🔍 Generating download link: s3://{bucket_name}/{key}")
+        
+        # Check if file exists
+        try:
+            s3.head_object(Bucket=bucket_name, Key=key)
+        except:
+            return f"❌ File not found: <strong>{key}</strong> in bucket {bucket_name}"
+        
+        # Generate presigned URL (valid for 1 hour)
+        url = s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': bucket_name, 'Key': key},
+            ExpiresIn=3600
+        )
+        
+        return f"✅ Download link generated for <strong>{key}</strong><br>" + \
+               f"Valid for 1 hour:<br>" + \
+               f"<a href='{url}' target='_blank'>Click to download</a><br>" + \
+               f"<small>Link expires in 60 minutes</small>"
+        
+    except Exception as e:
+        print(f"❌ Download link error: {str(e)}")
+        if 'NoSuchBucket' in str(e):
+            return f"❌ Bucket '{bucket_name}' does not exist"
+        elif 'AccessDenied' in str(e):
+            return f"❌ Access denied. Need s3:GetObject permission"
+        else:
+            return f"❌ Download link failed: {str(e)}"
+
+def set_file_public(bucket_name, key):
+    """Set S3 object to public read access"""
+    try:
+        print(f"🔍 Setting public access: s3://{bucket_name}/{key}")
+        
+        # Check if file exists
+        try:
+            s3.head_object(Bucket=bucket_name, Key=key)
+        except:
+            return f"❌ File not found: <strong>{key}</strong> in bucket {bucket_name}"
+        
+        # Set public-read ACL
+        s3.put_object_acl(
+            Bucket=bucket_name,
+            Key=key,
+            ACL='public-read'
+        )
+        
+        # Generate public URL
+        public_url = f"https://{bucket_name}.s3.amazonaws.com/{key}"
+        
+        return f"✅ File <strong>{key}</strong> is now public<br>" + \
+               f"Public URL:<br>" + \
+               f"<a href='{public_url}' target='_blank'>{public_url}</a><br>" + \
+               f"<small>Anyone can access this file</small>"
+        
+    except Exception as e:
+        print(f"❌ Set public error: {str(e)}")
+        if 'NoSuchBucket' in str(e):
+            return f"❌ Bucket '{bucket_name}' does not exist"
+        elif 'AccessDenied' in str(e):
+            return f"❌ Access denied. Need s3:PutObjectAcl permission or bucket blocks public access"
+        else:
+            return f"❌ Set public failed: {str(e)}"
+
+def search_files_by_name(keyword):
+    """Search for files containing keyword across all accessible buckets"""
+    try:
+        print(f"🔍 Searching files containing: {keyword}")
+        
+        # Get list of buckets
+        buckets_response = s3.list_buckets()
+        buckets = buckets_response['Buckets']
+        
+        matches = []
+        searched_buckets = 0
+        
+        for bucket in buckets[:5]:  # Limit to first 5 buckets for performance
+            bucket_name = bucket['Name']
+            try:
+                # List objects in bucket
+                objects_response = s3.list_objects_v2(Bucket=bucket_name, MaxKeys=100)
+                if 'Contents' in objects_response:
+                    for obj in objects_response['Contents']:
+                        if keyword.lower() in obj['Key'].lower():
+                            size_mb = round(obj['Size'] / (1024 * 1024), 2) if obj['Size'] > 1024*1024 else f"{obj['Size']} bytes"
+                            matches.append({
+                                'bucket': bucket_name,
+                                'key': obj['Key'],
+                                'size': size_mb,
+                                'modified': obj['LastModified'].strftime('%Y-%m-%d')
+                            })
+                searched_buckets += 1
+            except:
+                continue  # Skip buckets we can't access
+        
+        if not matches:
+            return f"🔍 No files found containing '<strong>{keyword}</strong>'<br>Searched {searched_buckets} accessible buckets"
+        
+        result = f"🔍 Found {len(matches)} files containing '<strong>{keyword}</strong>':<br><br>"
+        for match in matches[:10]:  # Show first 10 matches
+            result += f"• <strong>{match['key']}</strong><br>"
+            result += f"  Bucket: {match['bucket']} | Size: {match['size']} | Modified: {match['modified']}<br><br>"
+        
+        if len(matches) > 10:
+            result += f"<small>... and {len(matches) - 10} more matches</small>"
+        
+        return result
+        
+    except Exception as e:
+        print(f"❌ Search error: {str(e)}")
+        return f"❌ Search failed: {str(e)}"
+
+def test_vpc_connectivity():
+    """Test VPC connectivity for debugging"""
+    tests = []
+    
+    # Test Redis
+    try:
+        init_redis()
+        if redis_client:
+            redis_client.ping()
+            tests.append("✅ Redis: Connected")
+        else:
+            tests.append("❌ Redis: Failed")
+    except Exception as e:
+        tests.append(f"❌ Redis: {str(e)}")
+    
+    # Test Bedrock
+    try:
+        bedrock.list_foundation_models()
+        tests.append("✅ Bedrock: Connected")
+    except Exception as e:
+        tests.append(f"❌ Bedrock: {str(e)}")
+    
+    # Test DynamoDB
+    try:
+        list(dynamodb.tables.all())
+        tests.append("✅ DynamoDB: Connected")
+    except Exception as e:
+        tests.append(f"❌ DynamoDB: {str(e)}")
+    
+    return "<br>".join(tests)

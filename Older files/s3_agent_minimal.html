@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>S3 Agent</title>
+    <style>
+        body { font-family: Arial; margin: 0; padding: 20px; }
+        .chat { max-width: 800px; margin: 0 auto; border: 1px solid #ddd; border-radius: 5px; overflow: hidden; }
+        .header { background: #232F3E; color: white; padding: 10px; }
+        .messages { height: 400px; padding: 10px; overflow-y: auto; }
+        .input-area { display: flex; padding: 10px; border-top: 1px solid #ddd; }
+        input { flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        button { background: #FF9900; color: white; border: none; padding: 8px 15px; margin-left: 5px; border-radius: 4px; cursor: pointer; }
+        .user { text-align: right; margin: 5px 0; }
+        .bot { text-align: left; margin: 5px 0; }
+        .message-bubble { display: inline-block; padding: 8px 12px; border-radius: 15px; max-width: 70%; }
+        .user .message-bubble { background: #FF9900; color: white; }
+        .bot .message-bubble { background: #f1f1f1; }
+    </style>
+</head>
+<body>
+    <div class="chat">
+        <div class="header">S3 Agent</div>
+        <div class="messages" id="messages">
+            <div class="bot"><div class="message-bubble">Hello! I'm your S3 Agent. How can I help you today?</div></div>
+        </div>
+        <div class="input-area">
+            <input type="text" id="input" placeholder="Type your message...">
+            <button id="send">Send</button>
+        </div>
+    </div>
+
+    <script>
+        const messagesDiv = document.getElementById('messages');
+        const input = document.getElementById('input');
+        const sendButton = document.getElementById('send');
+        const apiEndpoint = 'https://1jbk6z92h3.execute-api.us-east-1.amazonaws.com/prod/s3agent';
+        let sessionId = Date.now().toString();
+
+        sendButton.addEventListener('click', sendMessage);
+        input.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') sendMessage();
+        });
+
+        function sendMessage() {
+            const message = input.value.trim();
+            if (!message) return;
+
+            // Add user message
+            addMessage(message, 'user');
+            input.value = '';
+
+            // Call API
+            fetch(apiEndpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message, session_id: sessionId })
+            })
+            .then(response => response.json())
+            .then(data => {
+                addMessage(data.response, 'bot');
+                if (data.session_id) sessionId = data.session_id;
+            })
+            .catch(error => {
+                addMessage('Error: Could not connect to the server.', 'bot');
+                console.error(error);
+            });
+        }
+
+        function addMessage(text, sender) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = sender;
+            
+            const bubble = document.createElement('div');
+            bubble.className = 'message-bubble';
+            bubble.textContent = text;
+            
+            messageDiv.appendChild(bubble);
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+    </script>
+</body>
+</html>

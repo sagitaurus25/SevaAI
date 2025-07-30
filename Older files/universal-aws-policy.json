@@ -1,0 +1,34 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:*",
+                "ec2:Describe*",
+                "ec2:Start*",
+                "ec2:Stop*",
+                "ec2:Reboot*",
+                "lambda:*",
+                "iam:List*",
+                "iam:Get*",
+                "cloudwatch:*",
+                "apigateway:GET",
+                "rds:Describe*",
+                "dynamodb:List*",
+                "dynamodb:Describe*",
+                "sns:List*",
+                "sqs:List*",
+                "elasticache:Describe*",
+                "kinesis:List*",
+                "kinesis:Describe*",
+                "route53:List*",
+                "cloudfront:List*",
+                "elasticloadbalancing:Describe*",
+                "autoscaling:Describe*",
+                "logs:*"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
